@@ -1,36 +1,139 @@
 
 import cv2
+import argparse
+from pathlib import Path
+from collections import Counter
 from ultralytics import YOLO
 
-# Load YOLO26n model
-model = YOLO("yolo26n.pt")
+# Project paths
+BACKEND_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BACKEND_DIR.parent
 
-# Open computer webcam
-cap = cv2.VideoCapture(0)
+# Model settings
+MODEL_PATH = PROJECT_DIR / "yolo26n.pt"
+VEHICLE_CLASSES = [2, 3, 5, 7]
+CONFIDENCE = 0.4
 
-if not cap.isOpened():
-    print("Error: Cannot open camera")
-    exit()
 
-while True:
-    ret, frame = cap.read()
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--source",
+        default="0",
+        help="Camera index or video file path"
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save annotated video"
+    )
+    args = parser.parse_args()
 
-    if not ret:
-        print("Cannot read camera frame")
-        break
+    # Load YOLO26n
+    model = YOLO(str(MODEL_PATH))
 
-    # Detect objects in the frame
-    results = model.predict(frame, conf=0.4, verbose=False)
+    # Select webcam or video
+    source = (
+        int(args.source)
+        if args.source.isdigit()
+        else args.source
+    )
 
-    # Draw bounding boxes and labels
-    annotated_frame = results[0].plot()
+    cap = cv2.VideoCapture(source)
 
-    # Display the results
-    cv2.imshow("YOLO26n Object Detection", annotated_frame)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open source: {source}")
 
-    # Press Q to quit
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+    writer = None
+    output_dir = BACKEND_DIR / "output"
+    output_file = output_dir / "detected_traffic.mp4"
 
-cap.release()
-cv2.destroyAllWindows()
+    try:
+        if args.save:
+            output_dir.mkdir(exist_ok=True)
+
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+
+            if fps <= 0:
+                fps = 30
+
+            writer = cv2.VideoWriter(
+                str(output_file),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                (width, height)
+            )
+
+            if not writer.isOpened():
+                raise RuntimeError("Cannot create output video")
+
+        while True:
+            success, frame = cap.read()
+
+            if not success:
+                break
+
+            # Only detect vehicle categories
+            result = model.predict(
+                frame,
+                classes=VEHICLE_CLASSES,
+                conf=CONFIDENCE,
+                verbose=False
+            )[0]
+
+            # Count vehicles in current frame
+            counts = Counter()
+
+            for box in result.boxes:
+                class_id = int(box.cls[0])
+                name = result.names[class_id]
+                counts[name] += 1
+
+            total = sum(counts.values())
+
+            # Draw YOLO bounding boxes
+            annotated = result.plot()
+
+            # Display vehicle counts
+            labels = [
+                f"Total vehicles: {total}",
+                f"Cars: {counts['car']}",
+                f"Trucks: {counts['truck']}",
+                f"Buses: {counts['bus']}",
+                f"Motorcycles: {counts['motorcycle']}"
+            ]
+
+            for index, label in enumerate(labels):
+                cv2.putText(
+                    annotated,
+                    label,
+                    (15, 35 + index * 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 0),
+                    2
+                )
+
+            cv2.imshow("Traffic Detection v0.2", annotated)
+
+            if writer is not None:
+                writer.write(annotated)
+
+            # Press Q to close
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+    finally:
+        cap.release()
+
+        if writer is not None:
+            writer.release()
+            print(f"Video saved: {output_file}")
+
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
