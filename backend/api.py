@@ -19,6 +19,9 @@ from fastapi.responses import Response, StreamingResponse
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "backend"
 VIDEO_PATH = BACKEND / "videos" / "traffic.mp4"
+DEFAULT_VIDEO_URL = (
+    "https://cdn.pixabay.com/video/2019/10/25/28293-369325244_large.mp4"
+)
 WEIGHTS_PATH = ROOT / "yolo26n.pt"
 VEHICLE_CLASSES = [2, 3, 5, 7]  # car, motorcycle, bus, truck (COCO)
 CONFIDENCE = 0.25
@@ -61,11 +64,13 @@ def update_state(**changes):
 
 @app.get("/api/health")
 def health():
+    local_video_available = VIDEO_PATH.is_file()
     return {
         "ok": True,
         "model": "YOLO26n",
-        "video_available": VIDEO_PATH.is_file(),
-        "video_path": "backend/videos/traffic.mp4",
+        "video_available": local_video_available or bool(DEFAULT_VIDEO_URL),
+        "video_source": "local" if local_video_available else "Pixabay sample clip",
+        "video_path": "backend/videos/traffic.mp4" if local_video_available else DEFAULT_VIDEO_URL,
     }
 
 
@@ -95,7 +100,7 @@ def stop():
     return {"ok": True}
 
 
-def frames(cap):
+def frames(cap, loop_source=None):
     """Generate JPEGs for <img src='/api/stream'>, updating shared stats."""
     global _last_jpeg
     had_error = False
@@ -105,7 +110,13 @@ def frames(cap):
             start = monotonic()
             ok, frame = cap.read()
             if not ok:
-                break
+                if loop_source is None:
+                    break
+                cap.release()
+                cap = cv2.VideoCapture(loop_source)
+                ok, frame = cap.read()
+                if not ok:
+                    raise RuntimeError("Could not restart the video source after playback ended.")
 
             # Downsize large source video to reduce CPU cost.
             height, width = frame.shape[:2]
@@ -165,12 +176,6 @@ def frames(cap):
 
 @app.get("/api/stream")
 def stream(source: Literal["video", "webcam"] = "video"):
-    if source == "video" and not VIDEO_PATH.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="Missing backend/videos/traffic.mp4; place your video there first.",
-        )
-
     with state_lock:
         if current_state["active"]:
             raise HTTPException(status_code=409, detail="A stream is already running. Stop it first.")
@@ -186,14 +191,18 @@ def stream(source: Literal["video", "webcam"] = "video"):
         })
         stop_signal.clear()
 
-    cap = cv2.VideoCapture(str(VIDEO_PATH) if source == "video" else 0)
+    if source == "webcam":
+        cap = cv2.VideoCapture(0)
+    else:
+        video_source = str(VIDEO_PATH) if VIDEO_PATH.is_file() else DEFAULT_VIDEO_URL
+        cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
         cap.release()
         update_state(active=False, status="error", error=f"Could not open {source} source")
         raise HTTPException(status_code=503, detail=f"Could not open {source} source")
 
     return StreamingResponse(
-        frames(cap),
+        frames(cap, loop_source=video_source if source == "video" else None),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-cache, no-store", "X-Content-Type-Options": "nosniff"},
     )

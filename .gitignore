@@ -222,6 +222,9 @@ node_modules/
 dist/
 .vite/
 
+# Local model weights
+yolo26n.pt
+
 # OS
 .DS_Store
 Thumbs.db

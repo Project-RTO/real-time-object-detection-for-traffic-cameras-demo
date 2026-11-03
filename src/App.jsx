@@ -1,11 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
-const detections = [
-  { label: 'Car', confidence: '98%', color: 'green' },
-  { label: 'Bus', confidence: '96%', color: 'blue' },
-  { label: 'Car', confidence: '93%', color: 'green' },
-  { label: 'Truck', confidence: '89%', color: 'amber' },
-]
+const EMPTY_STATS = {
+  count: 0,
+  counts: { car: 0, truck: 0, bus: 0, motorcycle: 0 },
+  detections: [],
+  frame: 0,
+  status: 'idle',
+  active: false,
+  error: null,
+}
 
 function TrafficPreview() {
   return (
@@ -82,8 +85,10 @@ function TrafficPreview() {
 export default function App() {
   const [online, setOnline] = useState(false)
   const [videoAvailable, setVideoAvailable] = useState(false)
+  const [videoLabel, setVideoLabel] = useState('Pixabay sample clip (online)')
   const [source, setSource] = useState('video')
   const [running, setRunning] = useState(false)
+  const [finished, setFinished] = useState(false)
   const [streamKey, setStreamKey] = useState(0)
   const [stats, setStats] = useState(EMPTY_STATS)
   const [error, setError] = useState('')
@@ -99,6 +104,7 @@ export default function App() {
         if (!cancelled) {
           setOnline(true)
           setVideoAvailable(info.video_available)
+          setVideoLabel(info.video_source === 'local' ? 'Local traffic video' : 'Pixabay sample clip (online)')
         }
       } catch {
         if (!cancelled) setOnline(false)
@@ -128,6 +134,7 @@ export default function App() {
           setRunning(false)
         } else if (next.status === 'finished' || next.status === 'stopped') {
           setRunning(false)
+          setFinished(true)
         }
       } catch {
         if (!cancelled) setError('Could not retrieve detection statistics.')
@@ -152,6 +159,7 @@ export default function App() {
     }
     setError('')
     setStats(EMPTY_STATS)
+    setFinished(false)
     setStreamKey(key => key + 1)
     setRunning(true)
   }
@@ -165,25 +173,36 @@ export default function App() {
     setRunning(false)
   }
 
-  const statusText = !online ? 'BACKEND OFFLINE' : running ? 'DETECTING' : 'READY'
+  async function handleStreamError() {
+    try {
+      const response = await fetch('/api/stats')
+      if (!response.ok) throw new Error('Could not check detection status')
+      const latest = await response.json()
+      setStats(latest)
+      setRunning(false)
+      if (latest.status === 'finished' || latest.status === 'stopped') {
+        setFinished(latest.status === 'finished')
+        return
+      }
+      if (latest.status === 'error') {
+        setError(latest.error || 'The detector reported an error.')
+        return
+      }
+      setError(latest.active
+        ? 'A detection stream is already running. Stop it before replaying.'
+        : 'The detection stream could not start. Check the backend terminal for details.')
+    } catch {
+      setRunning(false)
+      setError('The detection stream ended unexpectedly. Check the backend terminal.')
+    }
+  }
+
+  const statusText = !online ? 'BACKEND OFFLINE' : running ? 'DETECTING' : finished ? 'FINISHED' : 'READY'
   const statusColor = !online ? 'offline' : running ? 'live' : 'ready'
   const detected = stats.detections || []
   const counts = stats.counts || EMPTY_STATS.counts
-
-  const [copied, setCopied] = useState(false)
-  const [copyError, setCopyError] = useState(false)
-
-  async function copyCommand() {
-    try {
-      await navigator.clipboard.writeText('python backend/object_detection.py')
-      setCopied(true)
-      setCopyError(false)
-      window.setTimeout(() => setCopied(false), 2000)
-    } catch (error) {
-      console.error('Could not copy backend command:', error)
-      setCopyError(true)
-    }
-  }
+  const streamUrl = `/api/stream?source=${source}&key=${streamKey}`
+  const frameUrl = `/api/last-frame?key=${stats.frame}`
 
   return (
     <main className="app">
@@ -192,7 +211,6 @@ export default function App() {
           <span className="brand-icon">TV</span>
           <span>Traffic Vision</span>
         </a>
-        <span className="project-label">COLLEGE PROJECT · OBJECT DETECTION</span>
       </header>
 
       <section className="intro">
@@ -201,7 +219,7 @@ export default function App() {
           <h1>Traffic camera object detection</h1>
           <p className="intro-copy">Live vehicle detection powered by OpenCV, FastAPI and YOLO26n.</p>
         </div>
-        <span className={`status ${statusColor}`}><span className="status-dot" />{statusText}</span>
+        <span className={`status ${statusColor}`}>{!finished && <span className="status-dot" />}{statusText}</span>
       </section>
 
       <section className="content-grid">
@@ -209,62 +227,81 @@ export default function App() {
           <div className="card-heading">
             <div>
               <h2>Detection preview</h2>
-              <p>Example bounding boxes for detected road users</p>
+              <p>{running ? `Live ${source === 'video' ? 'traffic video' : 'webcam'} detection` : 'Start detection to see the annotated camera feed'}</p>
             </div>
-            <span className="preview-tag">ILLUSTRATION</span>
+            <span className={`preview-tag ${running ? 'preview-tag-live' : ''}`}>{running ? 'LIVE' : finished ? 'LAST FRAME' : 'IDLE'}</span>
           </div>
           <div className="preview-frame">
-            <TrafficPreview />
+            {running ? (
+              <img
+                key={streamKey}
+                className="live-stream"
+                src={streamUrl}
+                alt="Live traffic detection stream with annotated vehicles"
+                onError={handleStreamError}
+              />
+            ) : finished ? (
+              <img className="live-stream" src={frameUrl} alt="Last annotated traffic detection frame" />
+            ) : (
+              <TrafficPreview />
+            )}
           </div>
-          <div className="legend">
-            <span><i className="green" /> Car</span>
-            <span><i className="blue" /> Bus</span>
-            <span><i className="amber" /> Truck</span>
+          <div className="stream-controls">
+            <label htmlFor="source">Input source</label>
+            <select id="source" value={source} onChange={event => setSource(event.target.value)} disabled={running}>
+              <option value="video">{videoLabel}</option>
+              <option value="webcam">Computer webcam</option>
+            </select>
+            {running ? (
+              <button className="stop-button" type="button" onClick={stopDetection}>Stop detection</button>
+            ) : (
+              <button className="start-button" type="button" onClick={startDetection} disabled={!online || (source === 'video' && !videoAvailable)}>
+                Start detection
+              </button>
+            )}
           </div>
-          <p className="preview-note">Illustrative preview only.</p>
+          {!online && <p className="preview-note">Start the FastAPI backend to enable live detection.</p>}
+          {online && source === 'video' && videoAvailable && <p className="preview-note">Using {videoLabel.toLowerCase()}. A local backend/videos/traffic.mp4 takes priority.</p>}
+          {online && source === 'video' && !videoAvailable && <p className="preview-note">Traffic video is not configured; select Computer webcam.</p>}
+          {error && <p className="stream-error" role="alert">{error}</p>}
         </article>
 
         <aside className="card details-card">
           <div className="card-heading">
             <div>
               <h2>Detection summary</h2>
-              <p>Sample objects and confidence</p>
+              <p>Vehicles detected in the current frame</p>
             </div>
           </div>
-          <div className="summary-count"><strong>04</strong><span>sample detections</span></div>
+          <div className="summary-count"><strong>{stats.count}</strong><span>vehicles in frame</span></div>
+          <div className="vehicle-counts" aria-label="Vehicle counts">
+            <span>Cars <strong>{counts.car}</strong></span>
+            <span>Trucks <strong>{counts.truck}</strong></span>
+            <span>Buses <strong>{counts.bus}</strong></span>
+            <span>Motorcycles <strong>{counts.motorcycle}</strong></span>
+          </div>
           <div className="detection-list">
-            {detections.map((detection, index) => (
+            {detected.map((detection, index) => (
               <div className="detection-row" key={`${detection.label}-${index}`}>
-                <span className={`object-icon ${detection.color}`}>▰</span>
+                <span className="object-icon blue">▰</span>
                 <span className="object-name">{detection.label}<small>Object {String(index + 1).padStart(2, '0')}</small></span>
-                <strong className="confidence">{detection.confidence}</strong>
+                <strong className="confidence">{detection.confidence}%</strong>
               </div>
             ))}
           </div>
+          {running && <p className="frame-counter">Processed frame {stats.frame}</p>}
           <div className="model-card">
             <div className="model-heading"><span className="model-mark">YOLO</span><strong>YOLO26n</strong></div>
             <dl>
-              <div><dt>Input</dt><dd>Computer webcam</dd></div>
-              <div><dt>Confidence threshold</dt><dd>40%</dd></div>
-              <div><dt>Output</dt><dd>OpenCV display</dd></div>
+              <div><dt>Input</dt><dd>{source === 'video' ? 'Traffic video' : 'Computer webcam'}</dd></div>
+              <div><dt>Confidence threshold</dt><dd>25%</dd></div>
+              <div><dt>Output</dt><dd>Browser stream</dd></div>
             </dl>
           </div>
         </aside>
       </section>
 
-      <section className="setup">
-        <div>
-          <h2>Run the detector</h2>
-          <p>Start the existing Python backend in a terminal from the project folder.</p>
-        </div>
-        <div className="command-row">
-          <code>python backend/object_detection.py</code>
-          <button type="button" onClick={copyCommand}>{copied ? 'Copied' : 'Copy command'}</button>
-        </div>
-        {copyError && <p className="copy-error" role="status">Copy failed. Select and copy the command above.</p>}
-      </section>
-
-      <footer>Traffic Vision <span>·</span> Frontend preview for the local YOLO webcam script</footer>
+      <footer>Traffic Vision <span>·</span> Live local detection powered by FastAPI and YOLO26n</footer>
     </main>
   )
 }
